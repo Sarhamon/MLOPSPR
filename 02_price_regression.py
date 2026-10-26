@@ -162,44 +162,59 @@ def fit_feature_state(df: pd.DataFrame) -> dict:
     return state
 
 
-def transform_features(df: pd.DataFrame, state: dict) -> pd.DataFrame:
-    X = pd.DataFrame(index=df.index)
+def _one_hot(values: pd.Series, levels: list, prefix: str) -> pd.DataFrame:
+    """values 가 각 level 과 같은지를 0/1 열로. 열을 하나씩 만들지 않고 한 번의 비교로 계산."""
+    hits = values.to_numpy()[:, None] == np.asarray(levels, dtype=object)[None, :]
+    return pd.DataFrame(hits.astype(int), index=values.index, columns=[f"{prefix}{lv}" for lv in levels])
 
-    for c in NUMERIC_BASE:
-        X[c] = pd.to_numeric(df[c], errors="coerce").fillna(0) if c in df.columns else 0.0
-    X["주행거리"] = X["주행거리"].clip(upper=1_000_000)  # 데이터 오류(1.8억 km 등) 방지
+
+def transform_features(df: pd.DataFrame, state: dict) -> pd.DataFrame:
+    # [성능] 열 164개를 X[c] = ... 로 하나씩 추가하면 pandas 가 추가할 때마다 내부 메모리를
+    # 다시 잡아서(PerformanceWarning: highly fragmented), 차 1대 예측에도 60ms 넘게 걸렸다.
+    # 열을 모두 모아 두었다가 마지막에 한 번에 DataFrame 으로 만든다. 열 순서/값은 예전과 같다.
+    def numeric(c):
+        if c not in df.columns:
+            return pd.Series(0.0, index=df.index)
+        return pd.to_numeric(df[c], errors="coerce").fillna(0)
+
+    base = {c: numeric(c) for c in NUMERIC_BASE}
+    base["주행거리"] = base["주행거리"].clip(upper=1_000_000)  # 데이터 오류(1.8억 km 등) 방지
     for c in state["option_cols"]:
-        X[c] = pd.to_numeric(df[c], errors="coerce").fillna(0) if c in df.columns else 0.0
+        base[c] = numeric(c)
 
     age = _age_months(df["연식"])
-    age_years = age / 12
-    X["나이개월"] = age
-    X["log주행"] = np.log1p(X["주행거리"])
-    X["연당주행"] = X["주행거리"] / np.maximum(age_years, 0.5)
+    base["나이개월"] = age
+    base["log주행"] = np.log1p(base["주행거리"])
+    base["연당주행"] = base["주행거리"] / np.maximum(age / 12, 0.5)
 
     # 신차가(옵션 미포함, 원): 차급/트림을 숫자 하나로 요약해 주는 피처.
     # 예측 시점에도 알 수 있는 값이라 누수가 아님(가격은 입력으로 쓰지 않음).
     # 없는 행(예전 CSV, 사이트 미제공)은 0 + '신차가있음'=0 으로 표시
     msrp = pd.to_numeric(df["신차가"], errors="coerce") if "신차가" in df.columns else pd.Series(np.nan, index=df.index)
     msrp = msrp.where(msrp > 0)
-    X["신차가있음"] = msrp.notna().astype(int)
-    X["log신차가"] = np.log(msrp).fillna(0)
+    base["신차가있음"] = msrp.notna().astype(int)
+    base["log신차가"] = np.log(msrp).fillna(0)
 
-    fuel = df["연료"].astype(str)
-    for lv in state["fuel_levels"]:
-        X[f"연료_{lv}"] = (fuel == lv).astype(int)
-
-    for b in state["top_brands"]:
-        X[f"브_{b}"] = (df["브랜드"] == b).astype(int)
-
-    X["세대"] = pd.to_numeric(
+    generation = pd.to_numeric(
         df["이름"].astype(str).str.extract(r"(\d+)세대", expand=False), errors="coerce"
     ).fillna(0)
 
-    token_sets = _name_tokens(df["이름"])
-    for t in state["vocab"]:
-        X[f"토큰_{t}"] = token_sets.apply(lambda s, t=t: int(t in s))
+    # 이름 토큰: 단어마다 전체 행을 다시 훑지 않고, 행마다 한 번만 훑어 해당 칸에 1을 표시
+    vocab_index = {t: j for j, t in enumerate(state["vocab"])}
+    tokens = np.zeros((len(df), len(vocab_index)), dtype=int)
+    for i, toks in enumerate(_name_tokens(df["이름"])):
+        for t in toks:
+            j = vocab_index.get(t)
+            if j is not None:
+                tokens[i, j] = 1
 
+    X = pd.concat([
+        pd.DataFrame(base, index=df.index),
+        _one_hot(df["연료"].astype(str), state["fuel_levels"], "연료_"),
+        _one_hot(df["브랜드"], state["top_brands"], "브_"),
+        pd.DataFrame({"세대": generation}, index=df.index),
+        pd.DataFrame(tokens, index=df.index, columns=[f"토큰_{t}" for t in state["vocab"]]),
+    ], axis=1)
     return X.reindex(columns=state.get("columns", X.columns), fill_value=0)
 
 
