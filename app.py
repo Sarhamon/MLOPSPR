@@ -17,8 +17,10 @@ import json
 import logging
 import os
 import sys
+import threading
 import time
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -49,15 +51,64 @@ _spec = importlib.util.spec_from_file_location("price_regression", TRAIN_SCRIPT)
 price_regression = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(price_regression)
 
-from recommender import load_pool, recommend  # noqa: E402
+from recommender import POOL_PATH, load_pool, recommend  # noqa: E402
 
-saved = joblib.load(MODEL_PATH)
-pool = load_pool()
-model = saved["model"]
-feature_state = saved["feature_state"]
-target_col = saved["target_col"]
-# 어떤 모델이 낸 결과인지 로그에서 구분하기 위한 버전 (모델 파일 내용 해시)
-MODEL_VERSION = hashlib.sha256(MODEL_PATH.read_bytes()).hexdigest()[:12]
+
+# ---------------------------------------------------------
+# 모델 / 추천 후보 (재시작 없이 교체 반영)
+#   04_retrain.py 가 price_model.joblib 이나 recommend_pool.csv 를 바꾸면, 다음 요청 때
+#   파일 수정 시각이 달라진 것을 보고 다시 읽는다. 새 파일을 읽다 실패하면 기존 것을 계속 쓴다.
+#   요청 하나는 처음 받은 스냅샷(모델+후보+버전)만 쓰므로, 도중에 교체돼도 섞이지 않는다.
+# ---------------------------------------------------------
+@dataclass(frozen=True)
+class Artifacts:
+    model: object
+    feature_state: dict
+    target_col: str
+    pool: pd.DataFrame
+    version: str  # 어떤 모델이 낸 결과인지 로그에서 구분하기 위한 버전 (모델 파일 내용 해시)
+    loaded_at: str
+
+
+class ArtifactStore:
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._stamp = None
+        self._current = None
+        self.get()  # 시작할 때 못 읽으면 바로 실패하도록
+
+    @staticmethod
+    def _file_stamp():
+        return MODEL_PATH.stat().st_mtime_ns, POOL_PATH.stat().st_mtime_ns
+
+    def get(self) -> Artifacts:
+        stamp = self._file_stamp()
+        if stamp != self._stamp:
+            with self._lock:
+                if stamp != self._stamp:
+                    self._load(stamp)
+        return self._current
+
+    def _load(self, stamp):
+        try:
+            saved = joblib.load(MODEL_PATH)
+            current = Artifacts(
+                model=saved["model"], feature_state=saved["feature_state"], target_col=saved["target_col"],
+                pool=load_pool(), version=hashlib.sha256(MODEL_PATH.read_bytes()).hexdigest()[:12],
+                loaded_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            )
+        except Exception as e:  # noqa: BLE001 - 새 파일이 깨져도 서비스는 기존 모델로 계속
+            if self._current is None:
+                raise
+            print(f"[모델 다시 읽기 실패, 기존 모델 유지] {e!r}", file=sys.stderr)
+            self._stamp = stamp  # 같은 깨진 파일을 요청마다 다시 읽지 않도록
+            return
+        if self._current is not None:
+            print(f"[모델/추천 후보 다시 읽음] {self._current.version} -> {current.version}", file=sys.stderr)
+        self._current, self._stamp = current, stamp
+
+
+artifacts = ArtifactStore()
 
 
 # ---------------------------------------------------------
@@ -79,11 +130,11 @@ if REQUEST_LOG_FILE:
     request_logger.addHandler(logging.FileHandler(REQUEST_LOG_FILE, encoding="utf-8"))
 
 
-def log_event(event: str, **fields):
+def log_event(event: str, model_version: str, **fields):
     record = {
         "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "event": event,
-        "model_version": MODEL_VERSION,
+        "model_version": model_version,
         **fields,
     }
     request_logger.info(json.dumps(record, ensure_ascii=False, default=str))
@@ -156,9 +207,13 @@ def index():
 
 @app.get("/health")
 def health():
+    art = artifacts.get()
     return {
         "message": "중고차 가격 예측 API가 정상적으로 실행 중입니다.",
-        "target": target_col,
+        "target": art.target_col,
+        "model_version": art.version,
+        "pool_rows": len(art.pool),
+        "loaded_at": art.loaded_at,
     }
 
 
@@ -168,18 +223,19 @@ def health():
 @app.post("/predict")
 def predict(car: CarInput):
     started = time.perf_counter()
-    X = price_regression.transform_features(to_training_row(car), feature_state)
-    prediction = model.predict(X)[0]
+    art = artifacts.get()
+    X = price_regression.transform_features(to_training_row(car), art.feature_state)
+    prediction = art.model.predict(X)[0]
 
     request_id = uuid.uuid4().hex
     log_event(
-        "predict", request_id=request_id, input=car.model_dump(by_alias=True),
+        "predict", art.version, request_id=request_id, input=car.model_dump(by_alias=True),
         prediction=float(prediction), latency_ms=round((time.perf_counter() - started) * 1000, 1),
     )
     return {
         "request_id": request_id,
         "prediction": float(prediction),
-        "target": target_col,
+        "target": art.target_col,
         "message": "예측이 완료되었습니다.",
     }
 
@@ -200,15 +256,16 @@ class RecommendInput(BaseModel):
 @app.post("/recommend")
 def recommend_cars(req: RecommendInput):
     started = time.perf_counter()
+    art = artifacts.get()
     cars = recommend(
-        pool, req.최대예산, top_n=req.개수, brand=req.브랜드, min_year=req.최소연식,
+        art.pool, req.최대예산, top_n=req.개수, brand=req.브랜드, min_year=req.최소연식,
         max_km=req.최대주행거리, fuel=req.연료, no_accident=req.무사고만,
     )
 
     # 추천 결과는 '나중에 정답(실제 판매 여부)을 붙일 수 있는' 최소 정보만 남김
     request_id = uuid.uuid4().hex
     log_event(
-        "recommend", request_id=request_id, input=req.model_dump(),
+        "recommend", art.version, request_id=request_id, input=req.model_dump(),
         results=[
             {"rank": i + 1, "링크": c["링크"], "가격": c["가격"], "적정가격": c["적정가격"],
              "할인율": c["할인율"], "저렴": c["저렴"]}
@@ -233,7 +290,7 @@ class ClickInput(BaseModel):
 @app.post("/click", status_code=204)
 def click(ev: ClickInput):
     """사용자가 추천 매물 링크를 눌렀다는 신호 (암묵적 피드백)."""
-    log_event("click", request_id=ev.request_id, 링크=ev.링크, rank=ev.rank)
+    log_event("click", artifacts.get().version, request_id=ev.request_id, 링크=ev.링크, rank=ev.rank)
 
 
 # ---------------------------------------------------------
