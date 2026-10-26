@@ -214,6 +214,18 @@ def build_baseline_features(df: pd.DataFrame) -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 # 평가
 # ---------------------------------------------------------------------------
+def make_gbr():
+    """최종 모델. 04_retrain.py 도 같은 설정으로 챌린저를 학습한다."""
+    return GradientBoostingRegressor(n_estimators=500, learning_rate=0.03, max_depth=3,
+                                     subsample=0.8, loss="huber", alpha=0.9,
+                                     random_state=RANDOM_STATE)
+
+
+def listing_no(links: pd.Series) -> pd.Series:
+    """매물 링크의 no= 번호. 등록 순서대로 커지므로 '언제 올라온 매물인지'의 대리 지표로 쓴다."""
+    return pd.to_numeric(links.astype(str).str.extract(r"no=(\d+)", expand=False), errors="coerce")
+
+
 def holdout_metrics(model, X_test, y_test):
     pred = model.predict(X_test)
     return {
@@ -265,10 +277,6 @@ def main():
     def make_rf():
         return RandomForestRegressor(n_estimators=400, min_samples_leaf=2, max_features=0.5,
                                      random_state=RANDOM_STATE, n_jobs=-1)
-    def make_gbr():
-        return GradientBoostingRegressor(n_estimators=500, learning_rate=0.03, max_depth=3,
-                                         subsample=0.8, loss="huber", alpha=0.9,
-                                         random_state=RANDOM_STATE)
     def make_rf_old():
         return RandomForestRegressor(n_estimators=300, min_samples_leaf=2,
                                      random_state=RANDOM_STATE, n_jobs=-1)
@@ -350,6 +358,9 @@ def main():
         "feature_columns": list(X.columns),
         "target_col": TARGET_COL,
         "ref_year_month": (REF_YEAR, REF_MONTH),
+        # 재학습 파이프라인(04)이 '이 모델이 본 적 없는 새 매물'을 고르는 기준
+        "trained_max_no": int(listing_no(df["링크"]).max()),
+        "n_train": len(df),
     }, "price_model.joblib")
     print("모델 저장: price_model.joblib")
 
