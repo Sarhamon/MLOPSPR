@@ -268,7 +268,7 @@ def recommend_cars(req: RecommendInput):
         "recommend", art.version, request_id=request_id, input=req.model_dump(),
         results=[
             {"rank": i + 1, "링크": c["링크"], "가격": c["가격"], "적정가격": c["적정가격"],
-             "할인율": c["할인율"], "저렴": c["저렴"]}
+             "할인율": c["할인율"], "시세백분위": c["시세백분위"], "저렴": c["저렴"]}
             for i, c in enumerate(cars)
         ],
         latency_ms=round((time.perf_counter() - started) * 1000, 1),

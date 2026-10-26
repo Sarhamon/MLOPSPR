@@ -47,6 +47,12 @@ plt.rcParams["axes.unicode_minus"] = False
 CSV_PATH = "cars_processed.csv"
 POOL_CSV = "recommend_pool.csv"  # 추천 후보 매물 + 적정 가격 (recommender.py / app.py 가 사용)
 SUSPECT_DISCOUNT = 0.5  # 적정가 대비 이 비율 넘게 싼 매물은 이상 매물로 보고 추천 제외
+
+# '저렴' 판정용 비교 그룹 (build_recommend_pool 참고)
+DOMESTIC_BRANDS = {"현대", "기아", "제네시스", "쉐보레", "KG모빌리티", "르노코리아", "르노삼성", "GM대우", "쌍용", "대우"}
+BARGAIN_AGE_BINS = [-1, 3, 6, 10, 15, 100]  # 연식대(년): ~3, 3~6, 6~10, 10~15, 15~
+BARGAIN_QUANTILE = 0.1  # 그룹 안에서 하위 10% 가격이면 '저렴'
+MIN_GROUP_SIZE = 30     # 이보다 작은 그룹은 전체 기준 사용
 TARGET_COL = "신차대비가격"   # 예측 대상 (%, 중고가 / 신차가 * 100)
 
 RANDOM_STATE = 42
@@ -399,6 +405,16 @@ def main():
           f"이상 매물 의심 {int(pool['이상매물의심'].sum())}건)")
 
 
+def bargain_group(brands: pd.Series, age_months: pd.Series) -> pd.Series:
+    """'저렴' 판정용 비교 그룹: 국산/수입 x 연식대. 예: '국산_6~10년'"""
+    origin = np.where(brands.isin(DOMESTIC_BRANDS), "국산", "수입")
+    labels = ["~3년", "3~6년", "6~10년", "10~15년", "15년~"]
+    # 연식이 기준 시점보다 미래로 입력된 매물(나이 음수)도 어느 그룹엔가 들어가도록 범위를 자름
+    years = (age_months / 12).clip(lower=0, upper=BARGAIN_AGE_BINS[-1] - 1)
+    age = pd.cut(years, BARGAIN_AGE_BINS, labels=labels).astype(str)
+    return pd.Series(origin, index=brands.index) + "_" + age
+
+
 def build_recommend_pool(df: pd.DataFrame, X: pd.DataFrame, y: pd.Series, make_model) -> pd.DataFrame:
     """추천 후보(현재 판매 중인 매물)마다 적정 가격(시세)을 계산한다.
 
@@ -406,11 +422,28 @@ def build_recommend_pool(df: pd.DataFrame, X: pd.DataFrame, y: pd.Series, make_m
     예측하면 정답을 외운 값이 나와 모든 매물이 '적정가'로 보인다. 그래서 각 매물은
     자기가 빠진 fold로 학습한 모델로 예측한다(out-of-fold).
     적정가격 = 예측 신차대비가격 x 신차가, 할인율 = (적정가격 - 판매가) / 적정가격
+
+    '저렴' 판정과 추천 순서는 할인율이 아니라 '비슷한 차(그룹) 안에서의 순위'로 정한다.
+    할인율은 예측 신차대비가격으로 나누기 때문에, 신차대비가 낮은 오래된 차일수록 같은
+    예측 오차가 큰 할인율로 부풀려진다(예: 예측 15%에 오차 5%p = 할인율 33%). 그래서 할인율 순으로
+    뽑으면 상위 추천의 80%가 10년 넘은 차였다(전체 매물 중 비율은 35%).
+      잔차      = 실제 신차대비 - 예측 신차대비 (음수 = 예측보다 싸게 나옴)
+      그룹      = 국산/수입 x 연식대 (BARGAIN_AGE_BINS)
+      시세백분위 = 그룹 안에서 잔차가 몇 % 위치인지 (0에 가까울수록 비슷한 차 중 가장 쌈)
+      저렴      = 잔차가 그룹의 하위 BARGAIN_QUANTILE(10%) 기준보다 낮음
     """
     oof = np.zeros(len(y))
     for tr, te in KFold(CV_SPLITS, shuffle=True, random_state=RANDOM_STATE).split(X):
         oof[te] = make_model().fit(X.iloc[tr], y.iloc[tr]).predict(X.iloc[te])
-    mae = float(np.mean(np.abs(oof - y)))  # 신차대비 %p 단위 평균 오차
+
+    residual = pd.Series(np.asarray(y) - oof, index=df.index)
+    group = bargain_group(df["브랜드"], _age_months(df["연식"]))
+    small = group.map(group.value_counts()) < MIN_GROUP_SIZE
+    group = group.where(~small, "전체")  # 건수가 적은 그룹은 기준이 흔들려서 전체 기준을 씀
+    cut_by_group = residual.groupby(group).quantile(BARGAIN_QUANTILE)
+    cut_by_group["전체"] = residual.quantile(BARGAIN_QUANTILE)
+    cut = group.map(cut_by_group)
+    percentile = residual.groupby(group).rank(pct=True)
 
     on_sale = df["신차가"].notna() & (df["가격"] > 0)
     if "가격상태" in df.columns:
@@ -440,9 +473,13 @@ def build_recommend_pool(df: pd.DataFrame, X: pd.DataFrame, y: pd.Series, make_m
     pool["적정가격"] = (pool["예측_신차대비가격"] / 100 * pool["신차가"]).round(-4)
     pool["시세차이"] = pool["적정가격"] - pool["가격"]
     pool["할인율"] = pool["시세차이"] / pool["적정가격"]
-    # 모델 평균 오차보다 더 싸게 나온 매물만 '저렴'으로 표시 (오차 범위 안이면 판단 보류)
-    pool["오차범위"] = (mae / 100 * pool["신차가"]).round(-4)
-    pool["저렴"] = pool["시세차이"] > pool["오차범위"]
+    pool["비교그룹"] = group.to_numpy()
+    pool["시세백분위"] = percentile.to_numpy()
+    # 이 가격 이하면 비슷한 차 중 하위 10% = '저렴'. 사이트의 신차대비가격은 정수로 반올림된 값이라,
+    # 화면에 보이는 기준 가격과 판정이 어긋나지 않도록 판정은 원 단위 가격으로 한다.
+    threshold = ((oof + cut.to_numpy()) / 100 * pool["신차가"]).clip(lower=0)
+    pool["저렴기준가격"] = threshold.round(-4)
+    pool["저렴"] = pool["가격"] <= threshold
     # 시세의 절반 이하 가격은 대부분 진짜 급매가 아니라 데이터 오류
     # (계약금만 적은 미끼 매물, 사이트 신차가 오류, 연식 오입력 등) -> 추천에서 제외
     pool["이상매물의심"] = (pool["할인율"] > SUSPECT_DISCOUNT) | (pool["신차대비가격"] < 5)

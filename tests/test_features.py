@@ -40,6 +40,13 @@ def test_msrp_feature(pr):
     assert X["log신차가"].iloc[0] > 16
 
 
+def test_bargain_group(pr):
+    brands = pd.Series(["현대", "BMW", "기아", "벤츠", "기아"])
+    age_months = pd.Series([12, 12 * 8, 12 * 12, 12 * 20, -20])  # 마지막: 연식이 미래로 잘못 입력된 매물
+    assert pr.bargain_group(brands, age_months).tolist() == [
+        "국산_~3년", "수입_6~10년", "국산_10~15년", "수입_15년~", "국산_~3년"]
+
+
 def test_load_and_clean_drops_lease_and_junk(pr, tmp_path):
     rows = [
         car(가격=11_300_000, 신차대비가격="65", 매물유형="일반"),

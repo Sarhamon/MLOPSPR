@@ -56,4 +56,9 @@ def test_refresh_pool(retrain, workdir):
     assert info["rows"] > 0
     import pandas as pd
     pool = pd.read_csv(retrain.m.POOL_CSV)
-    assert {"적정가격", "할인율", "저렴", "이상매물의심"} <= set(pool.columns)
+    assert {"적정가격", "할인율", "시세백분위", "저렴기준가격", "저렴", "이상매물의심"} <= set(pool.columns)
+    assert pool["시세백분위"].between(0, 1).all()
+    # '저렴' 은 그룹마다 하위 10% 이므로 전체로도 10% 안팎이어야 한다
+    assert 0.03 < pool["저렴"].mean() < 0.2
+    # 저렴 표시와 저렴 기준 가격이 서로 맞아야 한다 (반올림 오차 1만원 허용)
+    assert (pool.loc[pool["저렴"], "가격"] <= pool.loc[pool["저렴"], "저렴기준가격"] + 10_000).all()

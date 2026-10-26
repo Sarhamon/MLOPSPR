@@ -101,7 +101,8 @@
   <div id="results"></div>
 
   <p class="note">적정가는 보배드림 매물 데이터로 학습한 모델의 추정치이며 평균 오차가 있습니다.
-    "시세 수준"은 적정가보다 싸지만 그 차이가 오차 범위 안이라는 뜻입니다. 구매 전 차량 상태를 꼭 직접 확인하세요.</p>
+    "저렴"은 비슷한 차(국산/수입 · 연식대) 중 시세 대비 가격이 하위 10%에 드는 매물이고,
+    "하위 N%"가 작을수록 비슷한 차 중에서 더 싸게 나온 매물입니다. 구매 전 차량 상태를 꼭 직접 확인하세요.</p>
 </main>
 
 <script>
@@ -131,7 +132,7 @@
         <h2><a href="${escapeHtml(car.링크)}" data-rank="${i + 1}" target="_blank" rel="noopener">${escapeHtml(car.이름)}</a></h2>
         <div class="price">${manwon(car.가격)}</div>
         <div class="reason">${escapeHtml(car.추천이유)}</div>
-        <span class="tag ${car.저렴 ? "good" : "neutral"}">${car.저렴 ? `${Math.round(car.할인율 * 100)}% 저렴` : "시세 수준"}</span>
+        <span class="tag ${car.저렴 ? "good" : "neutral"}">${car.저렴 ? `저렴 · 하위 ${Math.max(1, Math.round(car.시세백분위 * 100))}%` : "시세 수준"}</span>
       </article>`).join("");
   }
 
