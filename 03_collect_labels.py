@@ -49,9 +49,27 @@ def read_events(path: Path) -> list[dict]:
     return events
 
 
+def attach_labels(rec: pd.DataFrame, crawl: pd.DataFrame) -> pd.DataFrame:
+    """추천 행(링크, 추천일)에 크롤링 결과(링크, 가격상태, 수집일)를 맞춰 판매여부를 붙인다."""
+    latest = crawl["수집일"].max()
+    rec = rec.merge(crawl.rename(columns={"수집일": "마지막확인일"}), on="링크", how="left")
+
+    def label(r):
+        if pd.isna(r["마지막확인일"]) or latest <= r["추천일"]:
+            return "미확정"
+        if r["가격상태"] == "판매완료" or r["마지막확인일"] < latest:
+            return "판매됨"
+        return "미판매"
+
+    rec["판매여부"] = rec.apply(label, axis=1) if len(rec) else pd.Series(dtype=str)
+    return rec
+
+
 def main():
     if not LOG_PATH.exists():
-        raise SystemExit(f"로그 파일이 없습니다: {LOG_PATH} (app.py 를 실행해 요청을 받은 뒤 다시 시도하세요)")
+        # 서비스 초기에는 정상적인 상황이라 오류로 끝내지 않음 (run_pipeline.py 가 실패로 보지 않도록)
+        print(f"로그 파일이 없습니다: {LOG_PATH} (app.py 가 요청을 받은 뒤부터 정답을 붙일 수 있습니다)")
+        return
     events = read_events(LOG_PATH)
 
     rows = []
@@ -66,7 +84,8 @@ def main():
                 "최대예산": ev["input"].get("최대예산"), **r,
             })
     if not rows:
-        raise SystemExit("추천 로그가 없습니다.")
+        print("추천 로그가 아직 없습니다.")
+        return
     rec = pd.DataFrame(rows)
 
     clicks = {(ev["request_id"], ev["링크"]) for ev in events if ev.get("event") == "click"}
@@ -74,16 +93,7 @@ def main():
 
     crawl = pd.read_csv(CRAWL_CSV, usecols=["링크", "가격상태", "수집일"])
     latest = crawl["수집일"].max()
-    rec = rec.merge(crawl.rename(columns={"수집일": "마지막확인일"}), on="링크", how="left")
-
-    def label(r):
-        if pd.isna(r["마지막확인일"]) or latest <= r["추천일"]:
-            return "미확정"
-        if r["가격상태"] == "판매완료" or r["마지막확인일"] < latest:
-            return "판매됨"
-        return "미판매"
-
-    rec["판매여부"] = rec.apply(label, axis=1)
+    rec = attach_labels(rec, crawl)
     Path(OUT_CSV).parent.mkdir(parents=True, exist_ok=True)
     rec.to_csv(OUT_CSV, index=False, encoding="utf-8-sig")
 

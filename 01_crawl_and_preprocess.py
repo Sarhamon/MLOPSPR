@@ -367,211 +367,216 @@ def collect_links_for_category(base_url_template: str, max_pages: int = MAX_PAGE
 #    모아진 링크 전체를 DETAIL_WORKERS개씩 동시에 가져옵니다.
 # ---------------------------------------------------------------------------
 
-# 3-1. 카테고리들을 동시에 순회하며 상세페이지 링크를 모은다
-all_links = []
-with ThreadPoolExecutor(max_workers=LIST_WORKERS) as executor:
-    future_to_cat = {executor.submit(collect_links_for_category, c): c for c in CATEGORY_URLS}
-    done = 0
-    for future in as_completed(future_to_cat):
-        category_url = future_to_cat[future]
-        done += 1
+def main():
+    # 3-1. 카테고리들을 동시에 순회하며 상세페이지 링크를 모은다
+    all_links = []
+    with ThreadPoolExecutor(max_workers=LIST_WORKERS) as executor:
+        future_to_cat = {executor.submit(collect_links_for_category, c): c for c in CATEGORY_URLS}
+        done = 0
+        for future in as_completed(future_to_cat):
+            category_url = future_to_cat[future]
+            done += 1
+            try:
+                links = future.result()
+            except Exception as e:  # noqa: BLE001 - 카테고리 하나가 실패해도 나머지는 계속
+                print(f"[카테고리 실패] {category_url}: {e}")
+                continue
+            all_links.extend(links)
+            print(f"[카테고리 {done}/{len(CATEGORY_URLS)}] {len(links)}건 수집")
+
+    # 같은 매물이 여러 카테고리에 중복으로 걸릴 수 있어 링크 기준으로 중복 제거
+    all_links = list(dict.fromkeys(all_links))
+    print(f"수집 대상 상세페이지: {len(all_links)}건 (중복 제거 후)")
+
+    # 3-2. 상세 페이지들을 동시에 가져와서 파싱한다
+    rows = []
+    with ThreadPoolExecutor(max_workers=DETAIL_WORKERS) as executor:
+        futures = [executor.submit(fetch_and_parse_detail, link) for link in all_links]
+        for future in as_completed(futures):
+            row = future.result()
+            if row is not None:
+                rows.append(row)
+
+    df_cars = pd.DataFrame(data=rows, columns=cols)
+    print(f"수집 완료: {len(df_cars)}건")
+
+    if df_cars.empty:
+        raise SystemExit("수집된 데이터가 없습니다. 사이트 구조가 바뀌었거나 차단됐을 수 있습니다.")
+
+
+    # ---------------------------------------------------------------------------
+    # 4. 전처리 (원본 로직 유지, 안전장치만 추가)
+    # ---------------------------------------------------------------------------
+    # [수정] 원본 changemodel()은 공백 3개가 나오면 그 앞까지만 남겼습니다.
+    # 현대/기아는 "더 뉴", "디 올 뉴", "올 뉴" 같은 마케팅 수식어가 브랜드
+    # 바로 뒤에 붙는 경우가 많아서("현대 더 뉴 그랜저 하이브리드 2.4"), 이
+    # 규칙대로 자르면 정작 중요한 모델명("그랜저")이 통째로 날아가고
+    # "현대 더 뉴"만 남았습니다. 실제로 크롤링 데이터에서 "기아 더 뉴"라는
+    # 이름으로 126건이 뭉뚱그려져 있었습니다.
+    #
+    # 이제는:
+    #   - "이름" 컬럼은 자르지 않고 원본 전체 제목을 그대로 저장합니다
+    #     (나중에 필요하면 언제든 다시 파싱할 수 있도록 원본을 보존).
+    #   - 수식어(더/디/올/뉴 등)를 건너뛰고 그 다음에 나오는 진짜 모델명을
+    #     "모델명" 컬럼으로 따로 뽑아냅니다. 모델링에는 이 "모델명"(또는
+    #     "브랜드")을 쓰는 걸 추천합니다 — 전체 제목을 그대로 범주형으로
+    #     쓰면 값이 거의 다 달라져서(카디널리티 폭발) 학습에 오히려 방해가
+    #     됩니다.
+    FILLER_WORDS = {
+        "더", "디", "올", "뉴",
+        "the", "The", "THE", "new", "New", "NEW",
+    }
+
+
+    def changemodelname(str1: str) -> str:
+        if "그랜져" in str1:
+            return str1.replace("그랜져", "그랜저")
+        return str1
+
+
+    def extract_brand_model(full_name: str):
+        """'현대 더 뉴 그랜저 하이브리드 2.4' -> ('현대', '그랜저')
+        '포르쉐 911 8세대' -> ('포르쉐', '911')
+        수식어(더/디/올/뉴)를 건너뛰고 그 다음 나오는 1~2 단어를 모델명으로
+        본다. 완벽하지 않을 수 있으니(사이트마다 제목 구성이 다를 수 있음),
+        이상하게 뽑히는 사례가 보이면 이 함수만 조정하면 됩니다.
+        """
+        tokens = str(full_name).split()
+        if not tokens:
+            return "", ""
+        brand = tokens[0]
+        rest = tokens[1:]
+
+        idx = 0
+        while idx < len(rest) and rest[idx] in FILLER_WORDS:
+            idx += 1
+
+        model_tokens = rest[idx: idx + 2]
+        model = " ".join(model_tokens).strip()
+        return brand, model
+
+
+    df_cars["이름"] = df_cars["이름"].apply(changemodelname)  # 오타 교정만, 자르지 않음
+    df_cars[["브랜드", "모델명"]] = df_cars["이름"].apply(
+        lambda x: pd.Series(extract_brand_model(x))
+    )
+
+
+    def changeyear(string: str):
+        if not string or len(string) < 7:
+            return np.nan
         try:
-            links = future.result()
-        except Exception as e:  # noqa: BLE001 - 카테고리 하나가 실패해도 나머지는 계속
-            print(f"[카테고리 실패] {category_url}: {e}")
-            continue
-        all_links.extend(links)
-        print(f"[카테고리 {done}/{len(CATEGORY_URLS)}] {len(links)}건 수집")
-
-# 같은 매물이 여러 카테고리에 중복으로 걸릴 수 있어 링크 기준으로 중복 제거
-all_links = list(dict.fromkeys(all_links))
-print(f"수집 대상 상세페이지: {len(all_links)}건 (중복 제거 후)")
-
-# 3-2. 상세 페이지들을 동시에 가져와서 파싱한다
-rows = []
-with ThreadPoolExecutor(max_workers=DETAIL_WORKERS) as executor:
-    futures = [executor.submit(fetch_and_parse_detail, link) for link in all_links]
-    for future in as_completed(futures):
-        row = future.result()
-        if row is not None:
-            rows.append(row)
-
-df_cars = pd.DataFrame(data=rows, columns=cols)
-print(f"수집 완료: {len(df_cars)}건")
-
-if df_cars.empty:
-    raise SystemExit("수집된 데이터가 없습니다. 사이트 구조가 바뀌었거나 차단됐을 수 있습니다.")
+            year = int(string[:4])
+            month = int(string[5:7])
+        except ValueError:
+            return np.nan
+        return 12 * (2022 - year) + month
 
 
-# ---------------------------------------------------------------------------
-# 4. 전처리 (원본 로직 유지, 안전장치만 추가)
-# ---------------------------------------------------------------------------
-# [수정] 원본 changemodel()은 공백 3개가 나오면 그 앞까지만 남겼습니다.
-# 현대/기아는 "더 뉴", "디 올 뉴", "올 뉴" 같은 마케팅 수식어가 브랜드
-# 바로 뒤에 붙는 경우가 많아서("현대 더 뉴 그랜저 하이브리드 2.4"), 이
-# 규칙대로 자르면 정작 중요한 모델명("그랜저")이 통째로 날아가고
-# "현대 더 뉴"만 남았습니다. 실제로 크롤링 데이터에서 "기아 더 뉴"라는
-# 이름으로 126건이 뭉뚱그려져 있었습니다.
-#
-# 이제는:
-#   - "이름" 컬럼은 자르지 않고 원본 전체 제목을 그대로 저장합니다
-#     (나중에 필요하면 언제든 다시 파싱할 수 있도록 원본을 보존).
-#   - 수식어(더/디/올/뉴 등)를 건너뛰고 그 다음에 나오는 진짜 모델명을
-#     "모델명" 컬럼으로 따로 뽑아냅니다. 모델링에는 이 "모델명"(또는
-#     "브랜드")을 쓰는 걸 추천합니다 — 전체 제목을 그대로 범주형으로
-#     쓰면 값이 거의 다 달라져서(카디널리티 폭발) 학습에 오히려 방해가
-#     됩니다.
-FILLER_WORDS = {
-    "더", "디", "올", "뉴",
-    "the", "The", "THE", "new", "New", "NEW",
-}
+    df_cars["연식"] = df_cars["연식"].apply(changeyear)
+
+    df_cars["주행거리"] = df_cars["주행거리"].apply(
+        lambda x: x.replace(",", "")[:-2].rstrip() if isinstance(x, str) else x
+    )
+
+    matchfuel = {"디젤": 0, "LPG": 1, "가솔린": 2}
+    df_cars["연료"] = df_cars["연료"].replace(matchfuel)
 
 
-def changemodelname(str1: str) -> str:
-    if "그랜져" in str1:
-        return str1.replace("그랜져", "그랜저")
-    return str1
+    def engine(str1: str):
+        if not isinstance(str1, str):
+            return np.nan
+        index = str1.find("cc")
+        if index == -1:
+            return np.nan
+        return str1[:index].replace(",", "").rstrip()
 
 
-def extract_brand_model(full_name: str):
-    """'현대 더 뉴 그랜저 하이브리드 2.4' -> ('현대', '그랜저')
-    '포르쉐 911 8세대' -> ('포르쉐', '911')
-    수식어(더/디/올/뉴)를 건너뛰고 그 다음 나오는 1~2 단어를 모델명으로
-    본다. 완벽하지 않을 수 있으니(사이트마다 제목 구성이 다를 수 있음),
-    이상하게 뽑히는 사례가 보이면 이 함수만 조정하면 됩니다.
-    """
-    tokens = str(full_name).split()
-    if not tokens:
-        return "", ""
-    brand = tokens[0]
-    rest = tokens[1:]
-
-    idx = 0
-    while idx < len(rest) and rest[idx] in FILLER_WORDS:
-        idx += 1
-
-    model_tokens = rest[idx: idx + 2]
-    model = " ".join(model_tokens).strip()
-    return brand, model
+    df_cars["배기량"] = df_cars["배기량"].apply(engine)
 
 
-df_cars["이름"] = df_cars["이름"].apply(changemodelname)  # 오타 교정만, 자르지 않음
-df_cars[["브랜드", "모델명"]] = df_cars["이름"].apply(
-    lambda x: pd.Series(extract_brand_model(x))
-)
+    def guar(str1: str):
+        if str1 in ("만료", "불가"):
+            return pd.Series([0, 0, 0])
+        if str1 == "정보없음" or not isinstance(str1, str):
+            return pd.Series([np.nan, np.nan, np.nan])
+        index = str1.find("/")
+        if index == -1:
+            time_ = 0
+        else:
+            time_ = int(str1[: index - 3].strip())
+        km = str1[index + 1 :].replace(",", "")[:-2].strip()
+        return pd.Series([1, time_, km])
 
 
-def changeyear(string: str):
-    if not string or len(string) < 7:
-        return np.nan
-    try:
-        year = int(string[:4])
-        month = int(string[5:7])
-    except ValueError:
-        return np.nan
-    return 12 * (2022 - year) + month
+    guartable = df_cars["보증정보"].apply(guar)
+    guartable.columns = ["보증여부", "보증기간", "보증거리"]
+    df_cars = pd.concat([df_cars, guartable], axis=1)  # [수정] 원본은 괄호가 안 닫혀 SyntaxError
+    df_cars = df_cars.drop(["보증정보"], axis=1)
+
+    matchop = {"무": 0, "유": 1}
+    df_cars = df_cars.replace(matchop)
+
+    insurinfo = {"미등록": 0, "등록": 1}
+    df_cars["보험이력등록"] = df_cars["보험이력등록"].replace(insurinfo)
+    df_cars["보험_내차피해(가격)"] = df_cars["보험_내차피해(가격)"].apply(
+        lambda x: x.replace(",", "") if isinstance(x, str) else np.nan
+    )
+    df_cars["보험_타차피해(가격)"] = df_cars["보험_타차피해(가격)"].apply(
+        lambda x: x.replace(",", "") if isinstance(x, str) else np.nan
+    )
+
+    def manwon_to_won(str1):
+        """'1,130 만원' -> 11300000. 숫자가 없으면('[가격상담]', '-' 등) NaN."""
+        if not isinstance(str1, str):
+            return np.nan
+        m = re.search(r"([\d,]+)\s*만원", str1)
+        return int(m.group(1).replace(",", "")) * 10000 if m else np.nan
 
 
-df_cars["연식"] = df_cars["연식"].apply(changeyear)
+    # [수정] '[가격상담]', '[계약]', '[판매완료]' 같은 값이 가격 컬럼에 '[가격상담' 처럼
+    # 잘린 채 남던 문제 -> 가격은 숫자만 남기고, 상태는 가격상태 컬럼으로 분리
+    df_cars["가격상태"] = df_cars["가격"].apply(
+        lambda x: x.strip().strip("[]") if isinstance(x, str) and x.strip().startswith("[") else "판매중"
+    )
+    df_cars["가격"] = df_cars["가격"].apply(manwon_to_won)
+    df_cars["신차가"] = df_cars["신차가"].apply(manwon_to_won)
+    df_cars["신차대비가격"] = pd.to_numeric(df_cars["신차대비가격"], errors="coerce")
+    df_cars["수집일"] = date.today().isoformat()
 
-df_cars["주행거리"] = df_cars["주행거리"].apply(
-    lambda x: x.replace(",", "")[:-2].rstrip() if isinstance(x, str) else x
-)
+    keep_cols = [
+        "이름", "브랜드", "모델명", "연식", "주행거리", "연료", "배기량", "색상",
+        "옵션_선루프", "옵션_파노라마선루프", "옵션_열선앞", "옵션_열선뒤", "옵션_전방센서",
+        "옵션_후방센서", "옵션_전방캠", "옵션_후방캠", "옵션_어라운드뷰", "옵션_네비순정",
+        "보험이력등록", "소유자변경횟수", "사고상세_전손", "사고상세_침수전손", "사고상세_침수분손", "사고상세_도난",
+        "보험_내차피해(횟수)", "보험_내차피해(가격)", "사고상세_타차가해(횟수)", "보험_타차피해(가격)",
+        "가격", "신차대비가격", "링크",
+        "매물유형", "가격상태", "신차가", "수집일",
+    ]
+    df_cars = df_cars.loc[:, keep_cols]
 
-matchfuel = {"디젤": 0, "LPG": 1, "가솔린": 2}
-df_cars["연료"] = df_cars["연료"].replace(matchfuel)
+    # [데이터 누적] 사이트에는 현재 올라와 있는 매물(국산+수입 약 3천 건)만 보이고,
+    # 판매완료되면 가격이 지워지거나 페이지가 삭제됩니다. 그래서 한 번 크롤링해서는
+    # 데이터가 더 늘지 않으므로, 실행할 때마다 기존 CSV에 새 매물을 덧붙여 쌓습니다.
+    # 같은 매물(링크)이 다시 수집되면 최신 값으로 교체합니다.
+    if os.path.exists(OUTPUT_CSV):
+        old = pd.read_csv(OUTPUT_CSV)
+        # 예전 버전 CSV에는 신차대비가격에 '소유', '운용' 같은 글자가 섞여 있으므로 숫자만 남김
+        old["신차대비가격"] = pd.to_numeric(old["신차대비가격"], errors="coerce")
+        old["가격"] = pd.to_numeric(old["가격"], errors="coerce")
+        n_before = len(old)
+        df_cars = pd.concat([old, df_cars], ignore_index=True)
+        df_cars = df_cars.drop_duplicates(subset="링크", keep="last").loc[:, keep_cols]
+        print(f"기존 {n_before}건 + 이번 수집분 병합 -> 총 {len(df_cars)}건")
 
-
-def engine(str1: str):
-    if not isinstance(str1, str):
-        return np.nan
-    index = str1.find("cc")
-    if index == -1:
-        return np.nan
-    return str1[:index].replace(",", "").rstrip()
-
-
-df_cars["배기량"] = df_cars["배기량"].apply(engine)
-
-
-def guar(str1: str):
-    if str1 in ("만료", "불가"):
-        return pd.Series([0, 0, 0])
-    if str1 == "정보없음" or not isinstance(str1, str):
-        return pd.Series([np.nan, np.nan, np.nan])
-    index = str1.find("/")
-    if index == -1:
-        time_ = 0
-    else:
-        time_ = int(str1[: index - 3].strip())
-    km = str1[index + 1 :].replace(",", "")[:-2].strip()
-    return pd.Series([1, time_, km])
-
-
-guartable = df_cars["보증정보"].apply(guar)
-guartable.columns = ["보증여부", "보증기간", "보증거리"]
-df_cars = pd.concat([df_cars, guartable], axis=1)  # [수정] 원본은 괄호가 안 닫혀 SyntaxError
-df_cars = df_cars.drop(["보증정보"], axis=1)
-
-matchop = {"무": 0, "유": 1}
-df_cars = df_cars.replace(matchop)
-
-insurinfo = {"미등록": 0, "등록": 1}
-df_cars["보험이력등록"] = df_cars["보험이력등록"].replace(insurinfo)
-df_cars["보험_내차피해(가격)"] = df_cars["보험_내차피해(가격)"].apply(
-    lambda x: x.replace(",", "") if isinstance(x, str) else np.nan
-)
-df_cars["보험_타차피해(가격)"] = df_cars["보험_타차피해(가격)"].apply(
-    lambda x: x.replace(",", "") if isinstance(x, str) else np.nan
-)
-
-def manwon_to_won(str1):
-    """'1,130 만원' -> 11300000. 숫자가 없으면('[가격상담]', '-' 등) NaN."""
-    if not isinstance(str1, str):
-        return np.nan
-    m = re.search(r"([\d,]+)\s*만원", str1)
-    return int(m.group(1).replace(",", "")) * 10000 if m else np.nan
+    df_cars.to_csv(OUTPUT_CSV, index=False, encoding="utf-8-sig")
+    print(f"저장 완료: {OUTPUT_CSV}")
+    print(df_cars["매물유형"].fillna("(이전 버전 수집분)").value_counts().to_string())
+    print(f"신차대비가격 있는 행: {df_cars['신차대비가격'].notna().sum()}건 / 신차가 있는 행: {df_cars['신차가'].notna().sum()}건")
 
 
-# [수정] '[가격상담]', '[계약]', '[판매완료]' 같은 값이 가격 컬럼에 '[가격상담' 처럼
-# 잘린 채 남던 문제 -> 가격은 숫자만 남기고, 상태는 가격상태 컬럼으로 분리
-df_cars["가격상태"] = df_cars["가격"].apply(
-    lambda x: x.strip().strip("[]") if isinstance(x, str) and x.strip().startswith("[") else "판매중"
-)
-df_cars["가격"] = df_cars["가격"].apply(manwon_to_won)
-df_cars["신차가"] = df_cars["신차가"].apply(manwon_to_won)
-df_cars["신차대비가격"] = pd.to_numeric(df_cars["신차대비가격"], errors="coerce")
-df_cars["수집일"] = date.today().isoformat()
-
-keep_cols = [
-    "이름", "브랜드", "모델명", "연식", "주행거리", "연료", "배기량", "색상",
-    "옵션_선루프", "옵션_파노라마선루프", "옵션_열선앞", "옵션_열선뒤", "옵션_전방센서",
-    "옵션_후방센서", "옵션_전방캠", "옵션_후방캠", "옵션_어라운드뷰", "옵션_네비순정",
-    "보험이력등록", "소유자변경횟수", "사고상세_전손", "사고상세_침수전손", "사고상세_침수분손", "사고상세_도난",
-    "보험_내차피해(횟수)", "보험_내차피해(가격)", "사고상세_타차가해(횟수)", "보험_타차피해(가격)",
-    "가격", "신차대비가격", "링크",
-    "매물유형", "가격상태", "신차가", "수집일",
-]
-df_cars = df_cars.loc[:, keep_cols]
-
-# [데이터 누적] 사이트에는 현재 올라와 있는 매물(국산+수입 약 3천 건)만 보이고,
-# 판매완료되면 가격이 지워지거나 페이지가 삭제됩니다. 그래서 한 번 크롤링해서는
-# 데이터가 더 늘지 않으므로, 실행할 때마다 기존 CSV에 새 매물을 덧붙여 쌓습니다.
-# 같은 매물(링크)이 다시 수집되면 최신 값으로 교체합니다.
-if os.path.exists(OUTPUT_CSV):
-    old = pd.read_csv(OUTPUT_CSV)
-    # 예전 버전 CSV에는 신차대비가격에 '소유', '운용' 같은 글자가 섞여 있으므로 숫자만 남김
-    old["신차대비가격"] = pd.to_numeric(old["신차대비가격"], errors="coerce")
-    old["가격"] = pd.to_numeric(old["가격"], errors="coerce")
-    n_before = len(old)
-    df_cars = pd.concat([old, df_cars], ignore_index=True)
-    df_cars = df_cars.drop_duplicates(subset="링크", keep="last").loc[:, keep_cols]
-    print(f"기존 {n_before}건 + 이번 수집분 병합 -> 총 {len(df_cars)}건")
-
-df_cars.to_csv(OUTPUT_CSV, index=False, encoding="utf-8-sig")
-print(f"저장 완료: {OUTPUT_CSV}")
-print(df_cars["매물유형"].fillna("(이전 버전 수집분)").value_counts().to_string())
-print(f"신차대비가격 있는 행: {df_cars['신차대비가격'].notna().sum()}건 / 신차가 있는 행: {df_cars['신차가'].notna().sum()}건")
+if __name__ == "__main__":
+    main()
 
 
 # ---------------------------------------------------------------------------
