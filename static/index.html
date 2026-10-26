@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>중고차 추천</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --card: #ffffff; --text: #1d2330; --muted: #6b7280;
+    --line: #e3e6eb; --accent: #2563eb; --accent-text: #ffffff;
+    --good: #15803d; --good-bg: #e8f5ec; --neutral-bg: #eef1f5;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #12151b; --card: #1b2029; --text: #e7eaf0; --muted: #9aa3b2;
+      --line: #2c3340; --accent: #4f8cff; --accent-text: #0b1020;
+      --good: #4ade80; --good-bg: #16301f; --neutral-bg: #232a35;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font-family: "Pretendard", "Malgun Gothic", "Apple SD Gothic Neo", system-ui, sans-serif;
+    line-height: 1.5;
+  }
+  main { max-width: 860px; margin: 0 auto; padding: 32px 16px 64px; }
+  h1 { font-size: 1.6rem; margin: 0 0 4px; }
+  .sub { color: var(--muted); margin: 0 0 24px; }
+  form {
+    background: var(--card); border: 1px solid var(--line); border-radius: 12px;
+    padding: 20px; display: grid; gap: 14px;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  }
+  label { display: grid; gap: 6px; font-size: .9rem; color: var(--muted); }
+  input, select {
+    font: inherit; color: var(--text); background: var(--bg);
+    border: 1px solid var(--line); border-radius: 8px; padding: 9px 10px; width: 100%;
+  }
+  .budget { grid-column: 1 / -1; }
+  .budget input { font-size: 1.2rem; font-weight: 600; }
+  .check { display: flex; align-items: center; gap: 8px; color: var(--text); }
+  .check input { width: auto; }
+  button {
+    grid-column: 1 / -1; font: inherit; font-weight: 600; cursor: pointer;
+    background: var(--accent); color: var(--accent-text); border: 0; border-radius: 8px; padding: 12px;
+  }
+  button:disabled { opacity: .6; cursor: wait; }
+  #status { color: var(--muted); margin: 20px 0 12px; min-height: 1.5em; }
+  .car {
+    background: var(--card); border: 1px solid var(--line); border-radius: 12px;
+    padding: 16px 18px; margin-bottom: 12px;
+    display: grid; grid-template-columns: 1fr auto; gap: 4px 16px;
+  }
+  .car h2 { font-size: 1.05rem; margin: 0; }
+  .car h2 a { color: inherit; text-decoration: none; }
+  .car h2 a:hover { text-decoration: underline; }
+  .price { text-align: right; font-weight: 700; font-size: 1.15rem; white-space: nowrap; }
+  .reason { color: var(--muted); font-size: .92rem; }
+  .tag {
+    justify-self: end; align-self: start; font-size: .8rem; font-weight: 600;
+    padding: 2px 8px; border-radius: 999px; white-space: nowrap;
+  }
+  .tag.good { color: var(--good); background: var(--good-bg); }
+  .tag.neutral { color: var(--muted); background: var(--neutral-bg); }
+  .note { color: var(--muted); font-size: .82rem; margin-top: 24px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>예산으로 중고차 찾기</h1>
+  <p class="sub">최대 예산을 입력하면, 지금 판매 중인 매물 중 시세 대비 가장 저렴한 차량을 추천 이유와 함께 보여드립니다.</p>
+
+  <form id="form">
+    <label class="budget">최대 예산 (만원)
+      <input id="budget" type="number" min="1" step="1" value="2000" required>
+    </label>
+    <label>브랜드
+      <input id="brand" type="text" placeholder="예: 현대 (비우면 전체)">
+    </label>
+    <label>최소 연식
+      <input id="minYear" type="number" min="1990" max="2030" placeholder="예: 2019">
+    </label>
+    <label>최대 주행거리 (km)
+      <input id="maxKm" type="number" min="0" step="1000" placeholder="예: 80000">
+    </label>
+    <label>연료
+      <select id="fuel">
+        <option value="">전체</option>
+        <option>가솔린</option><option>디젤</option><option>LPG</option>
+        <option>가솔린 하이브리드</option><option>전기</option>
+      </select>
+    </label>
+    <label>추천 개수
+      <select id="count"><option>5</option><option selected>10</option><option>20</option></select>
+    </label>
+    <label class="check"><input id="noAccident" type="checkbox"> 보험사고 없는 차만</label>
+    <button id="submit" type="submit">추천 받기</button>
+  </form>
+
+  <div id="status"></div>
+  <div id="results"></div>
+
+  <p class="note">적정가는 보배드림 매물 데이터로 학습한 모델의 추정치이며 평균 오차가 있습니다.
+    "시세 수준"은 적정가보다 싸지만 그 차이가 오차 범위 안이라는 뜻입니다. 구매 전 차량 상태를 꼭 직접 확인하세요.</p>
+</main>
+
+<script>
+  const $ = (id) => document.getElementById(id);
+  const manwon = (won) => `${Math.round(won / 10000).toLocaleString("ko-KR")}만원`;
+  const numOrNull = (v) => (v === "" ? null : Number(v));
+
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+  }
+
+  let lastRequestId = null;
+
+  // 추천 매물을 눌렀는지 서버 로그로 남김 (새 탭이 열려도 요청이 끊기지 않도록 keepalive)
+  $("results").addEventListener("click", (e) => {
+    const a = e.target.closest("a[data-rank]");
+    if (!a || !lastRequestId) return;
+    fetch("/click", {
+      method: "POST", keepalive: true, headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ request_id: lastRequestId, 링크: a.href, rank: Number(a.dataset.rank) }),
+    }).catch(() => {});
+  });
+
+  function render(cars) {
+    $("results").innerHTML = cars.map((car, i) => `
+      <article class="car">
+        <h2><a href="${escapeHtml(car.링크)}" data-rank="${i + 1}" target="_blank" rel="noopener">${escapeHtml(car.이름)}</a></h2>
+        <div class="price">${manwon(car.가격)}</div>
+        <div class="reason">${escapeHtml(car.추천이유)}</div>
+        <span class="tag ${car.저렴 ? "good" : "neutral"}">${car.저렴 ? `${Math.round(car.할인율 * 100)}% 저렴` : "시세 수준"}</span>
+      </article>`).join("");
+  }
+
+  $("form").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const body = {
+      최대예산: Number($("budget").value) * 10000,
+      개수: Number($("count").value),
+      브랜드: $("brand").value.trim() || null,
+      최소연식: numOrNull($("minYear").value),
+      최대주행거리: numOrNull($("maxKm").value),
+      연료: $("fuel").value || null,
+      무사고만: $("noAccident").checked,
+    };
+    $("submit").disabled = true;
+    $("status").textContent = "추천 중...";
+    $("results").innerHTML = "";
+    try {
+      const res = await fetch("/recommend", {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+      });
+      if (!res.ok) throw new Error(`서버 오류 (${res.status})`);
+      const data = await res.json();
+      lastRequestId = data.request_id;
+      $("status").textContent = data.count ? `${data.count}대를 추천합니다.` : data.message;
+      render(data.cars);
+    } catch (err) {
+      $("status").textContent = `추천을 불러오지 못했습니다: ${err.message}`;
+    } finally {
+      $("submit").disabled = false;
+    }
+  });
+</script>
+</body>
+</html>

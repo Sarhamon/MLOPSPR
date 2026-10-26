@@ -1,1 +1,85 @@
-Test
+서비스 정의
+===========
+중고차 구매 희망자가 최대 예산을 입력하면, 현재 판매 중인 매물 중 시세 대비 가장 저렴한
+차량을 추천 이유와 함께 보여준다.
+
+- 시세(적정가) = 모델이 예측한 신차대비가격(%) x 신차가
+- 추천 순서 = 할인율((적정가 - 판매가) / 적정가)이 큰 순
+- 적정가의 절반 이하로 나온 매물은 데이터 오류(미끼 매물, 신차가 오류 등) 의심으로 제외
+
+실행 순서
+=========
+1) pip install -r requirements.txt
+2) python 01_crawl_and_preprocess.py
+   -> cars_processed.csv 생성 (이미 있으면 새 매물을 덧붙여 누적)
+3) python 02_price_regression.py
+   -> price_model.joblib(예측 모델), recommend_pool.csv(추천 후보 + 적정가) 생성
+4) python app.py
+   -> http://localhost:8000 (사용자 화면), http://localhost:8000/docs (API 문서)
+   - POST /recommend : 예산/조건 -> 추천 매물 목록
+   - POST /predict   : 차량 정보 -> 신차대비가격(%) 예측
+
+입력/예측값 및 정답 수집
+========================
+- app.py 는 요청마다 JSON 한 줄을 표준 출력과 logs/requests.jsonl 에 남깁니다.
+  - event: recommend(입력 조건 + 추천 매물/적정가/할인율), predict(입력 + 예측값), click(사용자가 누른 매물)
+  - 공통 필드: ts(UTC), request_id, model_version(모델 파일 해시)
+  - 파일 경로는 환경변수 REQUEST_LOG_FILE 로 바꿀 수 있고, 비워 두면 표준 출력에만 남깁니다.
+- AWS 에 배포하면 표준 출력이 CloudWatch Logs 로 수집됩니다(ECS awslogs 드라이버 / EC2 CloudWatch Agent).
+  Logs Insights 예시:
+    fields ts, request_id, `input.최대예산`
+    | filter event = "recommend"
+    | sort ts desc
+- 정답(실제 판매 여부): 크롤러를 다시 돌린 뒤 실행
+    python 03_collect_labels.py [로그파일]
+  -> logs/recommend_labels.csv. 추천한 매물이 다음 크롤링에서 판매완료/사라짐이면 '판매됨'.
+     '저렴' 추천의 판매율이 '시세 수준' 추천보다 높은지가 1차 평가 지표입니다.
+- 로그/정답 형식 예시는 samples/ 폴더를 참고하세요 (운영 로그 logs/ 는 git에 올리지 않음).
+
+(아래는 원본 스크립트를 고칠 때 남긴 기록입니다. 02 단계는 현재 R 대신
+02_price_regression.py 로 대체되었습니다.)
+
+수정한 버그 요약
+================
+[01_crawl_and_preprocess.py]
+1. pd.concat(...) 괄호 미종료 + 백틱(`) 오타로 인한 SyntaxError 수정
+2. pd.DataFrame() 생성이 for 루프 안에 있어 매 반복마다 새로 만들어지고
+   이후 append가 DataFrame 객체에 대해 호출되던 구조적 버그 수정
+   -> 모든 행을 파이썬 리스트에 모은 뒤 루프 종료 후 한 번만 DataFrame 생성
+3. BeautifulSoup의 find(text=...)는 최신 버전에서 find(string=...)로 변경됨
+   -> string= 우선 시도, 실패 시 text= 폴백
+4. requests.adapters.DEFAULT_RETRIES를 루프 안에서 매번 대입해도 실제
+   재시도에 반영되지 않던 부분 -> requests.Session + HTTPAdapter(Retry)로 교체
+5. User-Agent 헤더와 요청 간 딜레이(0.5초) 추가로 차단 가능성 완화
+6. 각 파싱 단계에 None 체크/예외 처리 추가 (페이지 구조가 다른 매물을
+   만나도 스크립트 전체가 죽지 않고 해당 건만 건너뜀)
+7. changeyear/engine 등 문자열 파싱 함수에 방어 코드 추가
+
+[02_price_regression.R]
+1. cars_processed.csv를 읽어 used_car를 만드는 코드 자체가 원본에 없어서
+   실행하면 바로 멈추던 문제 -> read.csv 로 로드하는 단계 추가
+2. 숫자형이어야 할 컬럼이 문자로 읽힐 수 있어 as.numeric 강제 변환,
+   결측 행 제거(complete.cases) 추가
+3. regnewdata 수식에서 "연료_0+ +연식" 처럼 + 가 중복된 오타 수정
+4. forward selection이 이미 full model(regnewdata)에서 시작해
+   사실상 변수를 추가하지 못하던 문제 -> null model에서 시작하도록
+   scope 지정
+5. 관측치 수(559)가 하드코딩돼 있던 부분 -> nrow(newdata)로 대체
+6. 영향점 행 번호(101,106,226,...)가 하드코딩돼 있어 크롤링 결과가
+   달라지면 무효해지는 문제 -> H_i(레버리지) > 0.2 기준으로 동적 계산
+7. 0으로 나누기 방지 로직(ifelse)에 NA 값도 함께 처리하도록 보강
+8. tmp[,-c(8,36,34,32)] 처럼 인덱스 번호로 컬럼을 골라내던 부분을
+   컬럼명 기준으로 변경 (실제 드롭 대상 컬럼은 데이터 확인 후 조정 필요)
+9. 패키지 미설치 시 자동 설치하도록 상단에 설치 체크 추가
+
+남은 주의사항
+=============
+- 보배드림은 크롤링을 막을 수 있습니다(과도한 요청 시 IP 차단, 캡차 등).
+  실행 전 로봇배제표준(robots.txt)과 이용약관을 확인하세요.
+- 사이트 HTML 구조가 바뀌면 find() 대상 클래스명/텍스트가 더 이상
+  일치하지 않을 수 있습니다. 그럴 경우 parse_detail() 함수를 다시
+  점검해야 합니다.
+- 02_price_regression.R의 "8. 컬럼 드롭" 부분은 원본이 숫자 인덱스로
+  컬럼을 골랐던 걸 이름 기준으로 바꾼 추정치입니다. 실제로 어떤 컬럼을
+  빼려던 것인지(이름/링크/가격/연료 등) cars_processed.csv 컬럼 순서를
+  보고 확인해 주세요.
