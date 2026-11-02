@@ -1,0 +1,29 @@
+# 운영(EC2)과 로컬 공용. 로컬에서는 compose.override.yaml 이 함께 읽혀 이미지를 직접 빌드한다.
+#   docker compose up -d                          # 서비스 시작 (http://localhost:8000)
+#   docker compose run --rm pipeline              # 재학습 파이프라인 1회 (01 -> 03 -> 04)
+#   docker compose run --rm pipeline --skip-crawl # 크롤링 없이 03 -> 04
+# app 과 pipeline 은 볼륨 data(/data)를 공유한다. 파이프라인이 모델/추천 후보 파일을 바꾸면
+# app 이 다음 요청 때 알아서 다시 읽으므로(app.py 의 ArtifactStore) 재시작이 필요 없다.
+
+services:
+  app:
+    image: ${IMAGE:-mlopspr:local}
+    restart: unless-stopped
+    ports:
+      - "${PORT:-8000}:8000"
+    volumes:
+      - data:/data
+    logging:
+      driver: json-file
+      options: { max-size: "20m", max-file: "5" }
+
+  pipeline:
+    image: ${IMAGE:-mlopspr:local}
+    entrypoint: ["python", "/app/run_pipeline.py"]
+    command: []
+    volumes:
+      - data:/data
+    profiles: ["pipeline"]  # up 할 때는 띄우지 않고, run 으로만 실행
+
+volumes:
+  data:
