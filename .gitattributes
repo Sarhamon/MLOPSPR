@@ -1,5 +1,0 @@
-# 리눅스(EC2, 컨테이너)에서 실행되는 파일은 Windows 에서 체크아웃해도 LF 유지
-*.sh text eol=lf
-Dockerfile text eol=lf
-*.yaml text eol=lf
-*.yml text eol=lf

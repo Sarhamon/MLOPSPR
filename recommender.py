@@ -12,13 +12,11 @@
     print(recommend(load_pool(), max_budget=20_000_000, top_n=5))
 """
 
-import os
 from pathlib import Path
 
 import pandas as pd
 
-# 컨테이너에서는 DATA_DIR(재학습 파이프라인과 공유하는 볼륨)에서 읽는다
-POOL_PATH = Path(os.environ.get("DATA_DIR", Path(__file__).resolve().parent)) / "recommend_pool.csv"
+POOL_PATH = Path(__file__).resolve().parent / "recommend_pool.csv"
 
 
 def load_pool(path: Path = POOL_PATH) -> pd.DataFrame:
