@@ -2,7 +2,7 @@
 필요할 때 실행하는 파이프라인: 크롤링(01) -> 정답 수집(03) -> 검증/재학습/추천 후보 갱신(04)
 
 - 단계마다 별도 프로세스로 실행하고, 한 단계라도 실패하면 거기서 멈춘다
-  (크롤링이 실패했는데 재학습하거나, 정답 수집이 실패했는데 추천 성능 경고를 판단하지 않도록).
+  (크롤링이 실패했는데 재학습하거나, 정답 수집이 실패했는데 성능 트리거를 판단하지 않도록).
 - 04 의 데이터 검증 실패(종료 코드 2)는 프로그램 오류와 구분해 'blocked' 로 기록한다.
 - 단계별 결과(상태, 소요 시간, 종료 코드)를 app.py 로그와 같은 JSON 한 줄 형식으로
   logs/pipeline.jsonl 에 남기고, 각 단계의 전체 출력은 logs/pipeline/<실행ID>_<단계>.log 에 저장한다.
@@ -25,10 +25,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent
-# 데이터/모델/로그가 있는 폴더. 각 단계는 이 폴더를 현재 폴더로 삼아 실행된다 (01/03/04 는 상대 경로를 씀).
-# 컨테이너에서는 app 과 공유하는 볼륨(/data)을 가리킨다.
-DATA_DIR = Path(os.environ.get("DATA_DIR", BASE_DIR))
-LOG_DIR = DATA_DIR / "logs"
+LOG_DIR = BASE_DIR / "logs"
 RUN_LOG = LOG_DIR / "pipeline.jsonl"
 LOCK = LOG_DIR / "pipeline.lock"
 LOCK_STALE_HOURS = 6
@@ -77,7 +74,7 @@ def run_step(run_id: str, name: str, script: str, timeout: int) -> str:
     with out_path.open("w", encoding="utf-8") as out:
         try:
             code = subprocess.run(
-                [sys.executable, str(BASE_DIR / script)], cwd=DATA_DIR, env=env, stdout=out, stderr=subprocess.STDOUT,
+                [sys.executable, script], cwd=BASE_DIR, env=env, stdout=out, stderr=subprocess.STDOUT,
                 timeout=timeout,
             ).returncode
         except subprocess.TimeoutExpired:
@@ -93,7 +90,7 @@ def run_step(run_id: str, name: str, script: str, timeout: int) -> str:
     else:
         status = "failed"
     log_run(event="pipeline_step", run_id=run_id, step=name, status=status, exit_code=code,
-            seconds=seconds, output=out_path.relative_to(DATA_DIR).as_posix())
+            seconds=seconds, output=out_path.relative_to(BASE_DIR).as_posix())
     return status
 
 

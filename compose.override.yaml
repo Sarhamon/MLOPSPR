@@ -1,5 +1,0 @@
-# 로컬 전용: docker compose up --build 로 현재 코드에서 이미지를 만든다.
-# (EC2 에는 이 파일을 두지 않아서 ECR 에서 받은 이미지만 사용)
-services:
-  app:
-    build: .

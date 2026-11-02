@@ -8,11 +8,9 @@
   1) 트리거 확인 - 아래 중 하나라도 해당하면 재학습
      - 데이터 트리거: 현재 모델(챔피언)이 학습한 뒤 새로 올라온 매물이 MIN_NEW_ROWS건 이상
        (매물 번호 no 가 챔피언의 trained_max_no 보다 큰 매물 = 챔피언이 본 적 없는 매물)
+     - 성능 트리거: 요청 로그 + 정답(03_collect_labels.py 결과)에서, 챔피언이 '저렴'이라고
+       추천한 매물의 판매율이 '시세 수준' 매물보다 높지 않음 (확정 정답 MIN_LABELS건 이상일 때)
      - --force
-     ※ 추천 성능('저렴' 추천 판매율이 '시세 수준'보다 높은지)은 재학습 트리거가 아니라 경고(alert)다.
-       추천 후보는 6)에서 매번 같은 학습 방식으로 새로 만들기 때문에 챔피언을 바꿔도 추천은 그대로이고,
-       성능이 나쁘면 학습 방식/비교 그룹/저렴 기준을 사람이 봐야 한다.
-       최근 LIFT_WINDOW_DAYS 일의 확정 정답(03_collect_labels.py 결과)이 MIN_LABELS건 이상일 때만 판단.
   2) 시간순 분리 - 새 매물 중 가장 최근 HOLDOUT_FRAC 를 시험용으로 떼어 둠
      (무작위로 나누면 챔피언이 이미 학습한 매물이 시험용에 섞여 챔피언이 부당하게 유리해짐)
   3) 챌린저 학습 - 시험용을 뺀 나머지 전체(기존 매물 + 앞쪽 새 매물)
@@ -20,7 +18,7 @@
   5) 교체 - 챌린저가 더 좋으면 전체 데이터로 다시 학습해 배포 (models/ 에 버전별 보관)
   6) 추천 후보 갱신 - 교체 여부와 관계없이 최신 크롤링으로 recommend_pool.csv 를 다시 만듦
      (안 그러면 모델이 유지되는 날에는 이미 팔린 매물을 계속 추천하게 됨)
-  모든 실행 결과(검증 실패/건너뜀/유지/교체, 성능 경고)는 models/registry.jsonl 에 한 줄씩 남는다.
+  모든 실행 결과(검증 실패/건너뜀/유지/교체)는 models/registry.jsonl 에 한 줄씩 남는다.
   실행 중인 app.py 는 모델/후보 파일이 바뀐 것을 감지해 재시작 없이 다시 읽는다.
 
 실행 (크롤링 01 → 정답 수집 03 다음에)
@@ -54,8 +52,7 @@ REGISTRY = MODELS_DIR / "registry.jsonl"
 LABELS_CSV = Path("logs/recommend_labels.csv")
 
 MIN_NEW_ROWS = 50     # 데이터 트리거 기준
-MIN_LABELS = 50       # 성능 경고를 판단할 최소 확정 정답 수
-LIFT_WINDOW_DAYS = 14  # 성능 경고에 쓰는 정답 기간 (추천일 기준 최근 며칠)
+MIN_LABELS = 50       # 성능 트리거를 판단할 최소 확정 정답 수
 HOLDOUT_FRAC = 0.5    # 새 매물 중 시험용 비율 (가장 최근 순)
 MIN_HOLDOUT = 20      # 시험용이 이보다 적으면 비교 결과를 믿을 수 없어 교체하지 않음
 EXIT_BLOCKED = 2      # 데이터 검증 실패 시 종료 코드 (run_pipeline.py 가 사용)
@@ -138,25 +135,18 @@ def replace_atomic(src: Path, dst: Path):
     os.replace(tmp, dst)
 
 
-def online_lift(today: date):
-    """로그 기반 운영 성능: 최근 LIFT_WINDOW_DAYS 일 추천 중 '저렴' 판매율 - '시세 수준' 판매율.
-    추천 후보는 모델 버전과 무관하게 매일 바뀌므로 버전으로 거르지 않고 기간으로 자른다.
+def online_lift(champion_version: str):
+    """로그 기반 운영 성능: 챔피언의 '저렴' 추천 판매율 - '시세 수준' 추천 판매율.
     정답이 부족하면 None."""
     if not LABELS_CSV.exists():
         return None, 0
     lab = pd.read_csv(LABELS_CSV)
-    since = (today - timedelta(days=LIFT_WINDOW_DAYS)).isoformat()
-    lab = lab[(lab["추천일"] >= since) & (lab["판매여부"] != "미확정")]
+    lab = lab[(lab["model_version"] == champion_version) & (lab["판매여부"] != "미확정")]
     sold = lab["판매여부"].eq("판매됨")
     rates = sold.groupby(lab["저렴"].astype(bool)).mean()
     if len(lab) < MIN_LABELS or len(rates) < 2:
         return None, len(lab)
     return float(rates[True] - rates[False]), len(lab)
-
-
-def lift_alert(lift) -> bool:
-    """'저렴' 추천이 '시세 수준'보다 더 잘 팔리지 않으면 경고 (판단할 정답이 부족하면 경고 안 함)."""
-    return lift is not None and lift <= 0
 
 
 def save_model(model, state, df, path: Path):
@@ -196,15 +186,19 @@ def retrain(df: pd.DataFrame, force: bool) -> dict:
     is_new = (nos > trained_max_no).to_numpy()
     n_new = int(is_new.sum())
 
+    lift, n_labels = online_lift(champ_ver)
     triggers = []
     if n_new >= MIN_NEW_ROWS:
         triggers.append(f"데이터: 새 매물 {n_new}건")
+    if lift is not None and lift <= 0:
+        triggers.append(f"성능: 저렴 추천 판매율 우위 {lift:+.3f}")
     if force:
         triggers.append("수동(--force)")
 
     print(f"챔피언 {champ_ver} (학습 {champion.get('n_train')}건, 마지막 매물 no={trained_max_no})")
-    print(f"새 매물 {n_new}건")
-    entry = {"champion": champ_ver, "n_new": n_new}
+    print(f"새 매물 {n_new}건 / 로그 확정 정답 {n_labels}건"
+          + (f", 저렴 추천 판매율 우위 {lift:+.3f}" if lift is not None else " (성능 판단에는 부족)"))
+    entry = {"champion": champ_ver, "n_new": n_new, "n_labels": n_labels, "online_lift": lift}
     if not triggers:
         print("트리거 없음 -> 재학습 건너뜀")
         return {**entry, "decision": "skip", "reason": "트리거 없음"}
@@ -294,16 +288,8 @@ def main():
         sys.exit(EXIT_BLOCKED)
     print("데이터 검증 통과\n")
 
-    lift, n_labels = online_lift(date.today())
-    print(f"최근 {LIFT_WINDOW_DAYS}일 확정 정답 {n_labels}건"
-          + (f", 저렴 추천 판매율 우위 {lift:+.3f}" if lift is not None else " (성능 판단에는 부족)"))
-    if lift_alert(lift):
-        print("[경고] '저렴' 추천이 '시세 수준'보다 더 잘 팔리지 않습니다. 재학습으로는 추천이 바뀌지 않으니 "
-              "학습 방식/비교 그룹/저렴 기준(02_price_regression.py)을 점검하세요.")
-
     df = m.load_and_clean(m.CSV_PATH)
     entry = retrain(df, args.force)
-    entry.update(n_labels=n_labels, online_lift=lift, alert=lift_alert(lift))
     entry["pool"] = refresh_pool(df)
     entry["data_stats"] = stats
     record(entry)
