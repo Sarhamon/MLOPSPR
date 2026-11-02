@@ -8,6 +8,7 @@
 # 지우기: bash infra/teardown_ec2.sh
 set -euo pipefail
 export MSYS_NO_PATHCONV=1  # Git Bash 가 /aws/... 같은 인자를 Windows 경로로 바꾸지 않도록
+export AWS_CLI_FILE_ENCODING=UTF-8  # Windows 용 aws.exe 가 file:// (한글 주석이 있는 user_data.sh)를 CP949 로 읽지 않도록
 
 export AWS_REGION="${AWS_REGION:-ap-northeast-2}"
 export AWS_DEFAULT_REGION="$AWS_REGION"
@@ -60,7 +61,9 @@ if [ "$INSTANCE_ID" = "None" ]; then
       --filters "Name=name,Values=al2023-ami-2023.*-kernel-*-x86_64" "Name=state,Values=available" \
       --query 'sort_by(Images,&CreationDate)[-1].ImageId')
   fi
-  USER_DATA=$(mktemp)
+  # 상대 경로로 만든다: Git Bash 의 /tmp 경로는 Windows 용 aws.exe 가 열지 못함
+  USER_DATA=$(mktemp ./.user_data.XXXXXX)
+  trap 'rm -f "$USER_DATA"' EXIT
   tr -d '\r' < "$(dirname "$0")/user_data.sh" > "$USER_DATA"  # Windows 체크아웃의 CRLF 가 남으면 스크립트가 실행되지 않음
   INSTANCE_ID=$(q ec2 run-instances --image-id "$AMI_ID" --instance-type "$INSTANCE_TYPE" \
     --key-name "$NAME" --security-group-ids "$SG_ID" \
@@ -74,15 +77,23 @@ fi
 aws ec2 wait instance-running --instance-ids "$INSTANCE_ID"
 echo "EC2: $INSTANCE_ID"
 
-# 5) 탄력적 IP
+# 5) 탄력적 IP (계정 한도에 걸리면 인스턴스 퍼블릭 IP 사용 - 인스턴스를 중지/시작하면 바뀜)
 ALLOC_ID=$(q ec2 describe-addresses --filters "Name=tag:Name,Values=$NAME" --query 'Addresses[0].AllocationId')
 if [ "$ALLOC_ID" = "None" ]; then
-  ALLOC_ID=$(q ec2 allocate-address --domain vpc \
-    --tag-specifications "ResourceType=elastic-ip,Tags=[{Key=Name,Value=$NAME}]" --query AllocationId)
+  if ! ALLOC_ID=$(q ec2 allocate-address --domain vpc \
+      --tag-specifications "ResourceType=elastic-ip,Tags=[{Key=Name,Value=$NAME}]" --query AllocationId 2>&1); then
+    echo "탄력적 IP 할당 실패 -> 인스턴스 퍼블릭 IP 사용: $(echo "$ALLOC_ID" | grep -o 'An error.*' | cut -c1-120)"
+    ALLOC_ID=""
+  fi
 fi
-aws ec2 associate-address --instance-id "$INSTANCE_ID" --allocation-id "$ALLOC_ID" >/dev/null
-PUBLIC_IP=$(q ec2 describe-addresses --allocation-ids "$ALLOC_ID" --query 'Addresses[0].PublicIp')
-echo "탄력적 IP: $PUBLIC_IP"
+if [ -n "$ALLOC_ID" ]; then
+  aws ec2 associate-address --instance-id "$INSTANCE_ID" --allocation-id "$ALLOC_ID" >/dev/null
+  PUBLIC_IP=$(q ec2 describe-addresses --allocation-ids "$ALLOC_ID" --query 'Addresses[0].PublicIp')
+  echo "탄력적 IP: $PUBLIC_IP"
+else
+  PUBLIC_IP=$(q ec2 describe-instances --instance-ids "$INSTANCE_ID" --query 'Reservations[0].Instances[0].PublicIpAddress')
+  echo "퍼블릭 IP: $PUBLIC_IP (탄력적 IP 아님 - 인스턴스를 중지했다 시작하면 바뀌니 GitHub EC2_HOST/SERVICE_URL 도 갱신)"
+fi
 
 cat <<EOF
 
@@ -98,5 +109,5 @@ cat <<EOF
   EC2_SSH_KEY           = $KEY_FILE 파일 내용 전체
 
 EC2 초기 설정(Docker 설치)은 2~3분 걸립니다. 확인:
-  ssh -i $KEY_FILE ec2-user@$PUBLIC_IP 'docker compose version && systemctl list-timers $NAME-pipeline.timer'
+  ssh -i $KEY_FILE ec2-user@$PUBLIC_IP 'docker compose version && systemctl list-timers mlopspr-pipeline.timer'
 EOF

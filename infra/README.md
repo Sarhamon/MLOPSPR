@@ -42,6 +42,7 @@
 
     aws configure                 # 액세스 키 ID / 비밀 키 / ap-northeast-2 / json
     bash infra/setup_ec2.sh       # 저장소 루트에서 (Windows 는 Git Bash)
+    # MFA 필요 계정 + 공용 계정 예: AWS_PROFILE=mfa NAME=mlopspr-2024100161 bash infra/setup_ec2.sh
     # 선택: HTTP_CIDR=<내 IP>/32 (서비스 접속 제한), INSTANCE_TYPE, ECR_REPO(기본 plus/mlops)
 
 ECR, 키 페어(~/.ssh/mlopspr.pem), 보안 그룹(80, 22), EC2(사용자 데이터 = infra/user_data.sh),
@@ -78,8 +79,26 @@ EC2_HOST 가 없으면 Deploy 는 건너뛰므로, 등록 전 push 는 CI 만 �
 
 배포
 ----
+- 로컬 (AWS CLI): 이미지 빌드 → ECR 푸시 → SSH 로 EC2 app 교체 → 스모크 테스트
+      AWS_PROFILE=mfa NAME=mlopspr-2024100161 bash infra/deploy.sh
+  배포 전/후 /health(모델·추천 후보 버전)와 이미지 태그(커밋 SHA, 커밋 안 한 변경이 있으면 -dirty-시각)를 출력.
+  필요: Docker Desktop 실행 중, setup_ec2.sh 가 만든 SSH 키(~/.ssh/<NAME>.pem)
 - 자동: main 에 push(PR 머지) → CI 성공 → Deploy
 - 수동: GitHub Actions > Deploy > Run workflow
+
+MFA 가 필요한 계정 (학교 계정: MFA 없이 들어온 CLI 요청은 거부됨)
+  액세스 키만으로는 EC2/ECR 요청이 막히므로, MFA 코드로 임시 자격 증명(최대 36시간)을 받아
+  mfa 프로필에 넣고 AWS_PROFILE=mfa 로 실행한다 (PowerShell):
+      $code = Read-Host "MFA 6자리 코드"
+      $c = (aws sts get-session-token --serial-number <MFA 장치 ARN> --token-code $code --duration-seconds 43200 --output json | ConvertFrom-Json).Credentials
+      aws configure set aws_access_key_id     $c.AccessKeyId     --profile mfa
+      aws configure set aws_secret_access_key $c.SecretAccessKey --profile mfa
+      aws configure set aws_session_token     $c.SessionToken    --profile mfa
+      aws configure set region ap-northeast-2 --profile mfa
+  MFA 장치 ARN: aws iam list-mfa-devices --query 'MFADevices[0].SerialNumber'
+  같은 이유로 GitHub Actions 배포에는 장기 액세스 키를 쓸 수 없다 (임시 자격 증명 + 세션 토큰 필요).
+여러 사람이 쓰는 공용 계정이면 NAME 에 학번 등을 붙여 다른 사람의 리소스와 이름이 겹치지 않게 한다
+(teardown_ec2.sh 는 이름 태그로 찾아 지운다).
 
 서비스 확인
 -----------

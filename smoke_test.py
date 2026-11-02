@@ -27,6 +27,8 @@ def call(path, body=None):
             return res.status, (json.loads(raw) if is_json else raw)
     except urllib.error.HTTPError as e:
         return e.code, e.read().decode("utf-8")
+    except (urllib.error.URLError, OSError) as e:  # 서버가 아직 안 떴거나 연결 거부/시간 초과
+        return 0, str(e)
 
 
 def main():
