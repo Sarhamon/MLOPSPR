@@ -22,6 +22,13 @@
    - POST /recommend : 예산/조건 -> 추천 매물 목록
    - POST /predict   : 차량 정보 -> 신차대비가격(%) 예측
 
+컨테이너 / 배포
+===============
+    docker compose up -d --build              # http://localhost:8000
+    docker compose run --rm pipeline          # 재학습 파이프라인 1회 (app 과 볼륨 공유, 재시작 불필요)
+    python smoke_test.py [주소]               # 화면/예측/추천/클릭 동작 확인
+- AWS(EC2 + docker compose) 배포 구성, 자동 배포(GitHub Actions), 운영/롤백 방법은 infra/README.md
+
 테스트
 ======
     pip install -r requirements-dev.txt

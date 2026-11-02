@@ -25,7 +25,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent
-LOG_DIR = BASE_DIR / "logs"
+# 데이터/모델/로그가 있는 폴더. 각 단계는 이 폴더를 현재 폴더로 삼아 실행된다 (01/03/04 는 상대 경로를 씀).
+# 컨테이너에서는 app 과 공유하는 볼륨(/data)을 가리킨다.
+DATA_DIR = Path(os.environ.get("DATA_DIR", BASE_DIR))
+LOG_DIR = DATA_DIR / "logs"
 RUN_LOG = LOG_DIR / "pipeline.jsonl"
 LOCK = LOG_DIR / "pipeline.lock"
 LOCK_STALE_HOURS = 6
@@ -74,7 +77,7 @@ def run_step(run_id: str, name: str, script: str, timeout: int) -> str:
     with out_path.open("w", encoding="utf-8") as out:
         try:
             code = subprocess.run(
-                [sys.executable, script], cwd=BASE_DIR, env=env, stdout=out, stderr=subprocess.STDOUT,
+                [sys.executable, str(BASE_DIR / script)], cwd=DATA_DIR, env=env, stdout=out, stderr=subprocess.STDOUT,
                 timeout=timeout,
             ).returncode
         except subprocess.TimeoutExpired:
@@ -90,7 +93,7 @@ def run_step(run_id: str, name: str, script: str, timeout: int) -> str:
     else:
         status = "failed"
     log_run(event="pipeline_step", run_id=run_id, step=name, status=status, exit_code=code,
-            seconds=seconds, output=out_path.relative_to(BASE_DIR).as_posix())
+            seconds=seconds, output=out_path.relative_to(DATA_DIR).as_posix())
     return status
 
 

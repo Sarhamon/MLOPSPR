@@ -36,7 +36,9 @@ from pydantic import BaseModel, ConfigDict, Field
 # 설정
 # ---------------------------------------------------------
 BASE_DIR = Path(__file__).resolve().parent
-MODEL_PATH = BASE_DIR / "price_model.joblib"
+# 모델/추천 후보/로그가 있는 폴더. 컨테이너에서는 재학습 파이프라인과 공유하는 볼륨(/data)을 가리킨다.
+DATA_DIR = Path(os.environ.get("DATA_DIR", BASE_DIR))
+MODEL_PATH = DATA_DIR / "price_model.joblib"
 TRAIN_SCRIPT = BASE_DIR / "02_price_regression.py"
 
 # 01 스크립트와 같은 연료 코드 (그 외 값은 '전기', '가솔린 하이브리드' 처럼 문자열 그대로)
@@ -121,7 +123,7 @@ artifacts = ArtifactStore()
 #   로컬에서는 REQUEST_LOG_FILE 에도 같은 줄을 쌓아 03_collect_labels.py 가 읽는다.
 #   (컨테이너처럼 파일이 필요 없으면 REQUEST_LOG_FILE= 로 비워 두면 된다)
 # ---------------------------------------------------------
-REQUEST_LOG_FILE = os.environ.get("REQUEST_LOG_FILE", str(BASE_DIR / "logs" / "requests.jsonl"))
+REQUEST_LOG_FILE = os.environ.get("REQUEST_LOG_FILE", str(DATA_DIR / "logs" / "requests.jsonl"))
 
 request_logger = logging.getLogger("car_service.requests")
 request_logger.setLevel(logging.INFO)
