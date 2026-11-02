@@ -67,6 +67,7 @@ class Artifacts:
     target_col: str
     pool: pd.DataFrame
     version: str  # 어떤 모델이 낸 결과인지 로그에서 구분하기 위한 버전 (모델 파일 내용 해시)
+    pool_version: str  # 추천 결과는 모델이 아니라 매일 다시 만드는 추천 후보로 정해지므로 따로 구분 (후보 파일 해시)
     loaded_at: str
 
 
@@ -95,6 +96,7 @@ class ArtifactStore:
             current = Artifacts(
                 model=saved["model"], feature_state=saved["feature_state"], target_col=saved["target_col"],
                 pool=load_pool(), version=hashlib.sha256(MODEL_PATH.read_bytes()).hexdigest()[:12],
+                pool_version=hashlib.sha256(POOL_PATH.read_bytes()).hexdigest()[:12],
                 loaded_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
             )
         except Exception as e:  # noqa: BLE001 - 새 파일이 깨져도 서비스는 기존 모델로 계속
@@ -212,6 +214,7 @@ def health():
         "message": "중고차 가격 예측 API가 정상적으로 실행 중입니다.",
         "target": art.target_col,
         "model_version": art.version,
+        "pool_version": art.pool_version,
         "pool_rows": len(art.pool),
         "loaded_at": art.loaded_at,
     }
@@ -265,7 +268,7 @@ def recommend_cars(req: RecommendInput):
     # 추천 결과는 '나중에 정답(실제 판매 여부)을 붙일 수 있는' 최소 정보만 남김
     request_id = uuid.uuid4().hex
     log_event(
-        "recommend", art.version, request_id=request_id, input=req.model_dump(),
+        "recommend", art.version, request_id=request_id, pool_version=art.pool_version, input=req.model_dump(),
         results=[
             {"rank": i + 1, "링크": c["링크"], "가격": c["가격"], "적정가격": c["적정가격"],
              "할인율": c["할인율"], "시세백분위": c["시세백분위"], "저렴": c["저렴"]}
