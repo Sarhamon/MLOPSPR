@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+
+      - name: 패키지 설치
+        run: pip install -r requirements-dev.txt
+
+      - name: 테스트
+        run: pytest -v
+
+  docker:
+    # 배포에 쓰는 이미지가 실제로 뜨고 동작하는지 확인 (EC2 와 같은 compose 파일 사용)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 이미지 빌드 + 실행 (헬스체크 통과까지 대기)
+        run: docker compose up -d --build --wait
+
+      - name: 스모크 테스트
+        run: python3 smoke_test.py http://localhost:8000
+
+      - name: 파이프라인 컨테이너 (크롤링 없이, app 과 볼륨 공유 확인)
+        # 저장소 데이터는 크롤링 날짜가 오래돼 04 는 데이터 검증에서 멈추는 게 정상 -> 종료 코드는 보지 않고
+        # 정답 수집(03) 단계가 공유 볼륨에서 성공했는지만 확인
+        run: |
+          docker compose run --rm pipeline --skip-crawl || true
+          docker compose exec -T app grep '"step": "labels", "status": "ok"' /data/logs/pipeline.jsonl
+
+      - name: 실패 시 컨테이너 로그
+        if: failure()
+        run: docker compose logs

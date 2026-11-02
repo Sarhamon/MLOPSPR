@@ -1,0 +1,12 @@
+﻿request_id,model_version,추천일,최대예산,rank,링크,가격,적정가격,할인율,저렴,클릭,가격상태,마지막확인일,판매여부
+03c2092c069c412c81ec69975367f18c,6e146d3a0518,2026-10-26,20000000.0,1,https://www.bobaedream.co.kr/mycar/mycar_view.php?no=2265048&gubun=I,4200000,8280000,0.493,True,1,판매중,2026-10-26,판매됨
+03c2092c069c412c81ec69975367f18c,6e146d3a0518,2026-10-26,20000000.0,2,https://www.bobaedream.co.kr/mycar/mycar_view.php?no=2265274&gubun=I,8900000,17420000,0.489,True,0,판매중,2026-10-26,판매됨
+03c2092c069c412c81ec69975367f18c,6e146d3a0518,2026-10-26,20000000.0,3,https://www.bobaedream.co.kr/mycar/mycar_view.php?no=2265392&gubun=K,2500000,4810000,0.48,True,0,판매완료,2026-10-26,판매됨
+03c2092c069c412c81ec69975367f18c,6e146d3a0518,2026-10-26,20000000.0,4,https://www.bobaedream.co.kr/mycar/mycar_view.php?no=2266747&gubun=I,5790000,11100000,0.478,False,0,판매중,2026-10-27,미판매
+03c2092c069c412c81ec69975367f18c,6e146d3a0518,2026-10-26,20000000.0,5,https://www.bobaedream.co.kr/mycar/mycar_view.php?no=2266674&gubun=K,3300000,6320000,0.478,True,0,판매중,2026-10-27,미판매
+998b93e5e1524606bee6ac53612696c2,6e146d3a0518,2026-10-26,15000000.0,1,https://www.bobaedream.co.kr/mycar/mycar_view.php?no=2265392&gubun=K,2500000,4810000,0.48,True,0,판매완료,2026-10-26,판매됨
+998b93e5e1524606bee6ac53612696c2,6e146d3a0518,2026-10-26,15000000.0,2,https://www.bobaedream.co.kr/mycar/mycar_view.php?no=2266674&gubun=K,3300000,6320000,0.478,True,1,판매중,2026-10-27,미판매
+998b93e5e1524606bee6ac53612696c2,6e146d3a0518,2026-10-26,15000000.0,3,https://www.bobaedream.co.kr/mycar/mycar_view.php?no=2265442&gubun=K,2000000,3640000,0.451,False,0,판매중,2026-10-27,미판매
+4fd50e0d3a364140b023996f57cd3f84,6e146d3a0518,2026-10-26,30000000.0,1,https://www.bobaedream.co.kr/mycar/mycar_view.php?no=2204966&gubun=I,11000000,17930000,0.387,True,0,판매중,2026-10-27,미판매
+4fd50e0d3a364140b023996f57cd3f84,6e146d3a0518,2026-10-26,30000000.0,2,https://www.bobaedream.co.kr/mycar/mycar_view.php?no=2265925&gubun=K,7600000,11190000,0.321,True,0,판매중,2026-10-27,미판매
+4fd50e0d3a364140b023996f57cd3f84,6e146d3a0518,2026-10-26,30000000.0,3,https://www.bobaedream.co.kr/mycar/mycar_view.php?no=2266441&gubun=I,24000000,34440000,0.303,True,0,판매중,2026-10-27,미판매
