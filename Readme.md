@@ -22,6 +22,13 @@
    - POST /recommend : 예산/조건 -> 추천 매물 목록
    - POST /predict   : 차량 정보 -> 신차대비가격(%) 예측
 
+컨테이너 / 배포
+===============
+    docker compose up -d --build              # http://localhost:8000
+    docker compose run --rm pipeline          # 재학습 파이프라인 1회 (app 과 볼륨 공유, 재시작 불필요)
+    python smoke_test.py [주소]               # 화면/예측/추천/클릭 동작 확인
+- AWS(EC2 + docker compose) 배포 구성, 자동 배포(GitHub Actions), 운영/롤백 방법은 infra/README.md
+
 테스트
 ======
     pip install -r requirements-dev.txt
@@ -36,6 +43,8 @@
 - app.py 는 요청마다 JSON 한 줄을 표준 출력과 logs/requests.jsonl 에 남깁니다.
   - event: recommend(입력 조건 + 추천 매물/적정가/할인율), predict(입력 + 예측값), click(사용자가 누른 매물)
   - 공통 필드: ts(UTC), request_id, model_version(모델 파일 해시)
+  - recommend 에는 pool_version(추천 후보 파일 해시)도 남김. 추천 결과는 모델이 아니라 매일 다시 만드는
+    추천 후보로 정해지므로, 어떤 후보에서 나온 추천인지는 이 값으로 구분합니다.
   - 파일 경로는 환경변수 REQUEST_LOG_FILE 로 바꿀 수 있고, 비워 두면 표준 출력에만 남깁니다.
 - AWS 에 배포하면 표준 출력이 CloudWatch Logs 로 수집됩니다(ECS awslogs 드라이버 / EC2 CloudWatch Agent).
   Logs Insights 예시:
@@ -44,7 +53,7 @@
     | sort ts desc
 - 정답(실제 판매 여부): 크롤러를 다시 돌린 뒤 실행
     python 03_collect_labels.py [로그파일]
-  -> logs/recommend_labels.csv. 추천한 매물이 다음 크롤링에서 판매완료/사라짐이면 '판매됨'.
+  -> logs/recommend_labels.csv. 추천한 매물이 다음 크롤링에서 판매완료/계약/사라짐이면 '판매됨'.
      '저렴' 추천의 판매율이 '시세 수준' 추천보다 높은지가 1차 평가 지표입니다.
 - 로그/정답 형식 예시는 samples/ 폴더를 참고하세요 (운영 로그 logs/ 는 git에 올리지 않음).
 
@@ -60,15 +69,18 @@ run_pipeline.py 가 세 단계를 차례로 실행합니다.
    기준을 벗어나면 재학습과 추천 후보 갱신을 모두 멈추고 종료 코드 2로 끝냄 (기준은 04_retrain.py 의 CHECKS)
 1) 트리거: 하나라도 해당하면 재학습
    - 데이터: 현재 모델이 학습한 뒤 새로 올라온 매물 50건 이상
-   - 성능: 로그 정답 50건 이상에서 '저렴' 추천 판매율이 '시세 수준'보다 높지 않음
    - 수동: --force
+   ※ 추천 성능 경고: 최근 14일 확정 정답 50건 이상에서 '저렴' 추천 판매율이 '시세 수준'보다 높지 않으면
+     레지스트리에 alert=true 로 남기고 [경고]를 출력. 재학습 트리거가 아닌 이유는, 추천 후보를 4)에서
+     매번 같은 학습 방식으로 새로 만들기 때문에 모델을 교체해도 추천은 바뀌지 않기 때문.
+     경고가 뜨면 학습 방식/비교 그룹/저렴 기준(02_price_regression.py)을 사람이 점검해야 함
 2) 평가: 새 매물 중 가장 최근 절반을 시험용으로 떼어(시간순 분리), 현재 모델(챔피언)과
    새 모델(챌린저)을 같은 시험용으로 비교. 챔피언은 이 매물들을 본 적이 없어 공정한 비교가 됨
 3) 교체: 챌린저 MAE가 더 낮을 때만 전체 데이터로 다시 학습해 price_model.joblib 을 교체.
    이전 모델은 models/model_<버전>.joblib 에 보관(롤백용)
 4) 추천 후보 갱신: 교체 여부와 관계없이 최신 크롤링으로 recommend_pool.csv 를 다시 만듦
    (모델이 유지되는 날에도 팔린 매물은 빠지고 새 매물이 들어가도록)
-5) 기록: 실행할 때마다 결과(검증 실패/건너뜀/유지/교체, 두 모델 점수, 데이터 통계)를
+5) 기록: 실행할 때마다 결과(검증 실패/건너뜀/유지/교체, 두 모델 점수, 성능 경고, 데이터 통계)를
    models/registry.jsonl 에 한 줄씩 남김
 - 실행 중인 app.py 는 모델/추천 후보 파일이 바뀌면 다음 요청 때 자동으로 다시 읽음(재시작 불필요).
   새 파일을 읽다 실패하면 기존 모델을 계속 쓰고, 현재 버전은 GET /health 에서 확인

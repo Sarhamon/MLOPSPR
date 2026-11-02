@@ -17,6 +17,7 @@ def test_index_and_health(client):
     assert "추천 받기" in client.get("/").text
     health = client.get("/health").json()
     assert len(health["model_version"]) == 12 and health["pool_rows"] > 0
+    assert len(health["pool_version"]) == 12
 
 
 def test_predict_uses_training_features(client, pr):
@@ -35,10 +36,15 @@ def test_predict_depends_on_age(client):
     assert 0 < old < new - 10 < 150
 
 
-def test_recommend(client):
+def test_recommend(client, monkeypatch):
+    import app
+    logged = []
+    monkeypatch.setattr(app, "log_event", lambda event, model_version, **f: logged.append(f))
     res = client.post("/recommend", json={"최대예산": 20_000_000, "개수": 5}).json()
     assert res["request_id"] and res["count"] == len(res["cars"]) <= 5
     assert all(c["가격"] <= 20_000_000 for c in res["cars"])
+    # 추천은 모델 파일이 아니라 추천 후보 파일로 정해지므로, 어떤 후보에서 나온 결과인지 남겨야 한다
+    assert logged[0]["pool_version"] == client.get("/health").json()["pool_version"]
 
 
 def test_invalid_input_rejected(client):
